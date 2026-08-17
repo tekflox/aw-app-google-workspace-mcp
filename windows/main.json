@@ -1,0 +1,78 @@
+{
+  "layout": "stack",
+  "regions": [
+    {
+      "id": "status",
+      "widgets": [
+        { "type": "markdown", "value": "## Google Workspace MCP" },
+        {
+          "type": "auth_status",
+          "bind": "GET /api/apps/google-workspace-mcp/status",
+          "logout_action": { "call": "POST /api/apps/google-workspace-mcp/logout" },
+          "loading_text": "Checking Google Workspace server…",
+          "logged_in_text": "Authorized as {authorized_accounts} — workspace-mcp {server_version} on port {port}, serving {tools} at {mcp_url}.",
+          "logged_out_text": "No Google account authorized yet. Save an OAuth client below, then complete consent — see Authorizing."
+        }
+      ]
+    },
+    {
+      "id": "oauth-client",
+      "widgets": [
+        {
+          "type": "markdown",
+          "value": "### OAuth client\nThe values ported from agentic-workspace are the **Workspace MCP** *Desktop app* client in the `crispal` Google Cloud project. Desktop clients accept any `localhost` redirect, which is what this server's callback uses — a Web client would need its exact callback URL registered in Google Cloud first.\n\nThe secret is stored in the zero-knowledge secret store, never in plain config."
+        },
+        {
+          "type": "form",
+          "id": "google_workspace_oauth",
+          "submit": { "call": "POST /api/apps/google-workspace-mcp/settings" },
+          "submit_label": "Save & restart server",
+          "fields": [
+            {
+              "key": "google_oauth_client_id",
+              "label": "OAuth client ID",
+              "input": "text",
+              "placeholder": "…apps.googleusercontent.com",
+              "description": "Not a credential on its own — also visible in this app's Settings."
+            },
+            {
+              "key": "google_oauth_client_secret",
+              "label": "OAuth client secret",
+              "input": "password",
+              "placeholder": "GOCSPX-…",
+              "description": "Leave blank to keep the secret already saved."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "authorizing",
+      "widgets": [
+        {
+          "type": "markdown",
+          "value": "### Authorizing a Google account\nA saved OAuth client is not consent. Two ways to get a token:\n\n1. **Import an existing one** — if this account was already authorized in agentic-workspace, copy its `<email>.json` from that host's `.tmp/google_workspace_mcp_credentials/` and POST it to `/api/apps/google-workspace-mcp/credentials` with `{\"email\": \"…\", \"credentials\": {…}}`. No consent screen, no browser.\n2. **Fresh consent** — ask any agent to call `start_google_auth(service_name=\"Gmail\")`. It returns a Google consent URL that a human has to open. The callback lands on this server's own `/oauth2callback`, so the browser completing it must be able to reach that port.\n\nTokens live in `$AW_WORKSPACE_HOME/data/google-workspace-mcp/credentials/` and survive an app reinstall."
+        }
+      ]
+    },
+    {
+      "id": "server",
+      "widgets": [
+        {
+          "type": "markdown",
+          "value": "### Server\n`workspace-mcp` runs in its own private venv — never the workspace's shared one, whose `starlette`/`cryptography`/`mcp` versions it would otherwise upgrade under every other Python MCP server. Reinstall it after changing `pin_version` in Settings."
+        },
+        {
+          "type": "button",
+          "label": "Restart server",
+          "action": { "call": "POST /api/apps/google-workspace-mcp/restart" }
+        },
+        {
+          "type": "button",
+          "label": "Reinstall server",
+          "action": { "call": "POST /api/apps/google-workspace-mcp/install" }
+        }
+      ]
+    }
+  ]
+}

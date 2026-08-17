@@ -1,0 +1,157 @@
+{
+  "manifest_version": 1,
+  "id": "google-workspace-mcp",
+  "name": "Google Workspace MCP",
+  "version": "0.1.0",
+  "description": "Ports agentic-workspace's aw-google-workspace integration into aw-workspace: runs the community workspace-mcp server (taylorwilsdon/google_workspace_mcp) as a managed background service and registers it with MCP Gateway, giving every agent Gmail, Drive, Calendar, Docs, Sheets, Tasks and Contacts tools behind one Google OAuth token.",
+  "icon": "mail",
+  "tier": "inprocess",
+  "requires_ui_refresh": true,
+  "category": "Integrations",
+  "publisher": "TekFlox",
+  "resource_estimate": {
+    "cpu": "low",
+    "memory": "low",
+    "disk": "medium"
+  },
+  "runtime": {
+    "python": ">=3.11",
+    "entrypoint": "google_workspace_mcp_app.plugin:GoogleWorkspaceMcpAppPlugin",
+    "pip_requires": []
+  },
+  "permissions": [
+    "routes:register",
+    "secrets:own",
+    "service:manage",
+    "fs:workspace-data",
+    "net:outbound"
+  ],
+  "contributes": {
+    "routes": [
+      {
+        "prefix": "/api/apps/google-workspace-mcp"
+      }
+    ],
+    "services": [
+      {
+        "id": "workspace-mcp",
+        "autostart": true
+      }
+    ],
+    "windows": [
+      {
+        "id": "google-workspace-mcp.main",
+        "title": "Google Workspace MCP",
+        "icon": "mail",
+        "body": {
+          "type": "declarative",
+          "spec": "windows/main.json"
+        }
+      }
+    ],
+    "settings_panels": [
+      {
+        "id": "google-workspace-mcp.settings",
+        "window": "google-workspace-mcp.main"
+      }
+    ],
+    "mcp": {
+      "reload_on_save": false,
+      "provides": [
+        "start_google_auth",
+        "search_gmail_messages",
+        "get_gmail_message_content",
+        "send_gmail_message",
+        "draft_gmail_message",
+        "list_gmail_labels",
+        "modify_gmail_message_labels",
+        "manage_gmail_filter",
+        "search_drive_files",
+        "get_drive_file_content",
+        "create_drive_file",
+        "update_drive_file",
+        "set_drive_file_permissions",
+        "get_drive_shareable_link",
+        "list_calendars",
+        "get_events",
+        "manage_event",
+        "query_freebusy",
+        "list_contacts",
+        "search_contacts",
+        "manage_contact",
+        "manage_contact_group",
+        "create_doc",
+        "get_doc_as_markdown",
+        "create_spreadsheet",
+        "read_sheet_values",
+        "modify_sheet_values",
+        "list_tasks",
+        "manage_task",
+        "list_task_lists"
+      ]
+    },
+    "skills": [
+      {
+        "id": "aw-google-workspace",
+        "path": "skills/aw-google-workspace/SKILL.md",
+        "description": "Full Google Workspace access (Gmail, Drive, Calendar, Docs, Sheets, Tasks, Contacts) through this app's workspace-mcp server on the aw-gateway — tool overview, the OAuth flow when a call says authorization is needed, and the attachment/path rule that avoids base64 corruption."
+      }
+    ]
+  },
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "google_oauth_client_id": {
+        "type": "string",
+        "description": "OAuth 2.0 client ID for the Google Cloud project this server authenticates against. Ported from agentic-workspace's src/config/mcp.json (the dedicated \"Workspace MCP\" Desktop-app client in the `crispal` project). Not a credential on its own, so it rides plain app config and is visible in Settings."
+      },
+      "google_oauth_client_secret": {
+        "type": "string",
+        "x-secret": true,
+        "description": "OAuth 2.0 client secret matching the client ID above. Routed to the zero-knowledge secret store via POST /api/apps/google-workspace-mcp/settings — never stored in plain config, same pattern as aw-app-notion's notion_token."
+      },
+      "user_google_email": {
+        "type": "string",
+        "default": "fredericowu@gmail.com",
+        "description": "Default Google account. The server runs with --single-user, so every tool call falls back to this address when `user_google_email` is not passed explicitly, and its OAuth token file is <credentials dir>/<email>.json."
+      },
+      "tools": {
+        "type": "string",
+        "default": "gmail drive calendar contacts docs sheets tasks",
+        "description": "Space-separated tool groups to register, passed straight to `workspace-mcp --tools`. Ported verbatim from the monolith. Valid: appscript, calendar, chat, contacts, docs, drive, forms, gmail, search, sheets, slides, tasks. Adding a group needs the server restarted (Settings → Restart server)."
+      },
+      "port": {
+        "type": "number",
+        "default": 8010,
+        "description": "Port workspace-mcp binds inside the workspace container, serving Streamable HTTP at /mcp. 8010 is the monolith's value (8000 was already taken there). Reachable only on the container network — MCP Gateway connects to it by container hostname; nothing is published to the host."
+      },
+      "allowed_file_dirs": {
+        "type": "string",
+        "default": "/opt/aw-workspace/.tmp",
+        "description": "Directories send_gmail_message's `attachments: [{path: ...}]` may read from (ALLOWED_FILE_DIRS). The monolith pointed this at /opt/agentic-workspace/.tmp; here it is the equivalent workspace scratch dir, so screenshots and exports can be attached by path instead of base64 — see the skill for why base64 attachments silently corrupt."
+      },
+      "oauth_redirect_uri": {
+        "type": "string",
+        "description": "Optional override for the OAuth callback URL (GOOGLE_OAUTH_REDIRECT_URI). Leave empty to use http://localhost:<port>/oauth2callback, which is what the ported Desktop-app OAuth client expects. Set this only if you switch to a Web-app OAuth client with a publicly reachable callback."
+      },
+      "pin_version": {
+        "type": "string",
+        "default": "1.24.1",
+        "description": "PyPI version of `workspace-mcp` installed into this app's own private venv. Pinned on purpose: the package pulls its own starlette/cryptography/mcp/fastmcp versions, which is exactly why it must never share the workspace's venv (that broke the monolith once)."
+      }
+    },
+    "required": []
+  },
+  "dependencies": {
+    "apps": [
+      {
+        "id": "mcp-gateway",
+        "version": ">=0.1.0",
+        "required": true,
+        "reason": "This app contributes an mcp.json entry (the 'google-workspace' server) that MCP Gateway discovers and merges; without the gateway the server runs but no agent can reach its tools."
+      }
+    ],
+    "note": "Runtime-enforced app dependency: aw-workspace loads mcp-gateway before this app so the gateway can scan google-workspace-mcp/mcp.json."
+  },
+  "migrations": {}
+}
