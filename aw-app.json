@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "google-workspace-mcp",
   "name": "Google Workspace MCP",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Ports agentic-workspace's aw-google-workspace integration into aw-workspace: runs the community workspace-mcp server (taylorwilsdon/google_workspace_mcp) as a managed background service and registers it with MCP Gateway, giving every agent Gmail, Drive, Calendar, Docs, Sheets, Tasks and Contacts tools behind one Google OAuth token.",
   "icon": "mail",
   "tier": "inprocess",
@@ -94,7 +94,7 @@
       {
         "id": "aw-google-workspace",
         "path": "skills/aw-google-workspace/SKILL.md",
-        "description": "Full Google Workspace access (Gmail, Drive, Calendar, Docs, Sheets, Tasks, Contacts) through this app's workspace-mcp server on the aw-gateway — tool overview, the OAuth flow when a call says authorization is needed, and the attachment/path rule that avoids base64 corruption."
+        "description": "Full Google Workspace access (Gmail, Drive, Calendar, Docs, Sheets, Tasks, Contacts) through this app's workspace-mcp server on the aw-gateway \u2014 tool overview, the OAuth flow when a call says authorization is needed, and the attachment/path rule that avoids base64 corruption."
       }
     ]
   },
@@ -108,7 +108,7 @@
       "google_oauth_client_secret": {
         "type": "string",
         "x-secret": true,
-        "description": "OAuth 2.0 client secret matching the client ID above. Routed to the zero-knowledge secret store via POST /api/apps/google-workspace-mcp/settings — never stored in plain config, same pattern as aw-app-notion's notion_token."
+        "description": "OAuth 2.0 client secret matching the client ID above. Routed to the zero-knowledge secret store via POST /api/apps/google-workspace-mcp/settings \u2014 never stored in plain config, same pattern as aw-app-notion's notion_token."
       },
       "user_google_email": {
         "type": "string",
@@ -118,17 +118,17 @@
       "tools": {
         "type": "string",
         "default": "gmail drive calendar contacts docs sheets tasks",
-        "description": "Space-separated tool groups to register, passed straight to `workspace-mcp --tools`. Ported verbatim from the monolith. Valid: appscript, calendar, chat, contacts, docs, drive, forms, gmail, search, sheets, slides, tasks. Adding a group needs the server restarted (Settings → Restart server)."
+        "description": "Space-separated tool groups to register, passed straight to `workspace-mcp --tools`. Ported verbatim from the monolith. Valid: appscript, calendar, chat, contacts, docs, drive, forms, gmail, search, sheets, slides, tasks. Adding a group needs the server restarted (Settings \u2192 Restart server)."
       },
       "port": {
         "type": "number",
         "default": 8010,
-        "description": "Port workspace-mcp binds inside the workspace container, serving Streamable HTTP at /mcp. 8010 is the monolith's value (8000 was already taken there). Reachable only on the container network — MCP Gateway connects to it by container hostname; nothing is published to the host."
+        "description": "Port workspace-mcp binds inside the workspace container, serving Streamable HTTP at /mcp. 8010 is the monolith's value (8000 was already taken there). Reachable only on the container network \u2014 MCP Gateway connects to it by container hostname; nothing is published to the host."
       },
       "allowed_file_dirs": {
         "type": "string",
         "default": "/opt/aw-workspace/.tmp",
-        "description": "Directories send_gmail_message's `attachments: [{path: ...}]` may read from (ALLOWED_FILE_DIRS). The monolith pointed this at /opt/agentic-workspace/.tmp; here it is the equivalent workspace scratch dir, so screenshots and exports can be attached by path instead of base64 — see the skill for why base64 attachments silently corrupt."
+        "description": "Directories send_gmail_message's `attachments: [{path: ...}]` may read from (ALLOWED_FILE_DIRS). The monolith pointed this at /opt/agentic-workspace/.tmp; here it is the equivalent workspace scratch dir, so screenshots and exports can be attached by path instead of base64 \u2014 see the skill for why base64 attachments silently corrupt."
       },
       "oauth_redirect_uri": {
         "type": "string",
