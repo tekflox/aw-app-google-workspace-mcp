@@ -55,9 +55,29 @@ browser has to be able to reach that callback. From a laptop it cannot, unless
 the port is tunnelled. Before starting a consent flow, prefer the path that
 needs no browser at all:
 
-**Import an existing token.** If the account was already authorized in
-agentic-workspace, its token file is on that host at
-`.tmp/google_workspace_mcp_credentials/<email>.json`. Post it straight in:
+### Completing consent when the redirect goes nowhere
+
+The ported client is a Google **Desktop app** client, and Google only lets
+those redirect to `localhost`/`127.0.0.1` — which means *the workspace
+container*. A human completing consent in their own browser therefore lands on
+a connection error.
+
+That failed tab is not a dead end: the authorization code is in its URL bar.
+Copy the whole URL and replay it:
+
+```bash
+curl -sS -X POST http://127.0.0.1:9030/api/apps/google-workspace-mcp/oauth-callback \
+  -H "X-Api-Key: $AW_WORKSPACE_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"url": "http://localhost:8010/oauth2callback?code=4/0A…&state=…"}'
+```
+
+The host and port in the pasted URL are ignored; only the query string matters.
+
+### Importing an existing token
+
+If the account was already authorized in agentic-workspace, its token file is
+on that host at `data/tmp/google_workspace_mcp_credentials/<email>.json` (note:
+`.tmp/` there is a bind-mount onto `data/tmp/`). Post it straight in:
 
 ```bash
 curl -sS -X POST http://127.0.0.1:9030/api/apps/google-workspace-mcp/credentials \
@@ -65,9 +85,33 @@ curl -sS -X POST http://127.0.0.1:9030/api/apps/google-workspace-mcp/credentials
   -d "{\"email\": \"someone@gmail.com\", \"credentials\": $(cat someone@gmail.com.json)}"
 ```
 
-Tokens are refresh tokens — they keep working after the move. Check what is
-authorized with `GET /api/apps/google-workspace-mcp/status`
+Check what is authorized with `GET /api/apps/google-workspace-mcp/status`
 (`authorized_accounts`).
+
+**But check the token is still alive first.** An imported file makes
+`authorized_accounts` non-empty whether or not Google still honours it, so a
+dead token looks identical to a good one until the first tool call. Found live
+on 2026-08-17: the monolith's token (issued 2026-07-17) refreshed with
+`invalid_grant`. The cause is not the move — **an OAuth app in `Testing`
+publishing status has its refresh tokens expire after 7 days**, which also
+explains the repeated re-auth rounds this integration needed in the monolith.
+Publishing the consent screen to `In production` is what stops it recurring.
+
+One request settles it, without touching the server:
+
+```bash
+python3 - <<'PY'
+import json, urllib.request, urllib.parse, urllib.error
+d = json.load(open('<credentials dir>/<email>.json'))
+body = urllib.parse.urlencode({'client_id': d['client_id'], 'client_secret': d['client_secret'],
+                               'refresh_token': d['refresh_token'], 'grant_type': 'refresh_token'}).encode()
+try:
+    urllib.request.urlopen(urllib.request.Request(d['token_uri'], data=body), timeout=45)
+    print("alive")
+except urllib.error.HTTPError as e:
+    print("dead:", e.code, e.read().decode()[:200])
+PY
+```
 
 ## How this runs here (differs from the monolith)
 

@@ -158,6 +158,76 @@ def build_routes(ctx, plugin) -> FastAPI:
         return {"dir": str(paths.credentials_dir()),
                 "accounts": _authorized_accounts()}
 
+    @app.post("/oauth-callback")
+    async def relay_oauth_callback(data: dict = Body(...)) -> dict:
+        """Finish a consent flow whose redirect could not be delivered.
+
+        The ported OAuth client is a Google **Desktop app** client, and Google
+        only allows those to redirect to `localhost`/`127.0.0.1`. "localhost"
+        means *the workspace container*, so when a human completes consent in a
+        browser on their own machine the redirect lands nowhere: the tab shows
+        a connection error.
+
+        That failed page is not a dead end — the authorization code is sitting
+        in its URL bar. Paste the whole URL here and this route replays it
+        against the server's own callback, over loopback, where it does resolve.
+        Everything after that (token exchange, writing `<email>.json`) is the
+        upstream server's normal flow, untouched.
+
+        Body: {"url": "http://localhost:8010/oauth2callback?code=…&state=…"} —
+        or {"code": "…", "state": "…"} if you'd rather pull the parts out
+        yourself. The host and port in a pasted URL are ignored; only the query
+        string is used, so a redirect that arrived on any port still works.
+        """
+        import urllib.parse
+
+        import httpx
+
+        raw_url = (data.get("url") or "").strip()
+        if raw_url:
+            query = urllib.parse.urlparse(raw_url).query
+            params = dict(urllib.parse.parse_qsl(query))
+        else:
+            params = {k: str(data[k]) for k in ("code", "state", "scope")
+                      if data.get(k)}
+
+        if params.get("error"):
+            # Google reports a declined consent in the redirect, not as an HTTP
+            # error — replaying it would just log a confusing failure.
+            return JSONResponse(
+                {"ok": False, "error": f"Google returned '{params['error']}' — "
+                                       "consent was declined or cancelled."},
+                status_code=400)
+        if not params.get("code"):
+            return JSONResponse(
+                {"ok": False,
+                 "error": "no authorization code found — paste the full "
+                          "redirect URL, including its ?code=… query string"},
+                status_code=400)
+
+        port = server_config.port_of(ctx.config)
+        target = f"http://127.0.0.1:{port}/oauth2callback"
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.get(target, params=params)
+        except Exception as exc:
+            return JSONResponse(
+                {"ok": False, "error": f"could not reach the local server at {target}: {exc}"},
+                status_code=502)
+
+        accounts = _authorized_accounts()
+        ok = resp.status_code < 400 and bool(accounts)
+        log.info("google-workspace-mcp: oauth callback relayed, status=%s accounts=%s",
+                 resp.status_code, accounts)
+        return {
+            "ok": ok,
+            "callback_status": resp.status_code,
+            "authorized_accounts": accounts,
+            # The server renders an HTML page; surface a trimmed body so a
+            # failure says something more useful than a bare status code.
+            "detail": resp.text[:400] if not ok else None,
+        }
+
     @app.post("/credentials")
     async def import_credentials(data: dict = Body(...)) -> dict:
         """Import an existing workspace-mcp token file instead of re-consenting.
