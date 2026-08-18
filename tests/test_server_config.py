@@ -167,3 +167,53 @@ def test_credentials_dir_is_durable_and_private(tmp_path, monkeypatch):
     assert str(d).startswith(str(tmp_path / "wh"))
     assert "/.data/" not in str(d)
     assert stat.S_IMODE(os.stat(d).st_mode) == 0o700
+
+
+# --- token health: present is not usable -------------------------------------
+
+def _routes_helpers(tmp_path, monkeypatch):
+    """Exercise the two helpers in routes.py without standing up FastAPI."""
+    monkeypatch.setenv("AW_WORKSPACE_HOME", str(tmp_path / "wh"))
+    import importlib
+    from google_workspace_mcp_app import paths as paths_mod, routes as routes_mod
+    importlib.reload(paths_mod)
+    return routes_mod, paths_mod
+
+
+def _write_token(paths_mod, email, scopes, refresh=True):
+    import json as _json
+    blob = {"scopes": scopes, "client_id": "c", "client_secret": "s",
+            "token_uri": "https://oauth2.googleapis.com/token", "token": "t"}
+    if refresh:
+        blob["refresh_token"] = "r"
+    (paths_mod.credentials_dir() / f"{email}.json").write_text(_json.dumps(blob))
+
+
+def test_oauth_states_is_not_an_account(tmp_path, monkeypatch):
+    """It lives in the credentials dir and is the server's CSRF-state store.
+    Globbing *.json counted it, so merely *starting* a consent flow made the
+    app report an authorized account."""
+    routes_mod, paths_mod = _routes_helpers(tmp_path, monkeypatch)
+    (paths_mod.credentials_dir() / "oauth_states.json").write_text("{}")
+    _write_token(paths_mod, "someone@gmail.com",
+                 ["https://www.googleapis.com/auth/calendar"])
+
+    accounts = sorted(p.stem for p in paths_mod.credentials_dir().glob("*.json")
+                      if "@" in p.stem)
+    assert accounts == ["someone@gmail.com"]
+
+
+def test_partial_grant_is_reported_as_unusable(tmp_path, monkeypatch):
+    """Google's consent screen lists sensitive scopes as opt-in checkboxes.
+    Clicking through without ticking them yields openid+userinfo only: the token
+    exchange succeeds and the file is written, but every API call still demands
+    re-authorization. Found live on 2026-08-18."""
+    routes_mod, paths_mod = _routes_helpers(tmp_path, monkeypatch)
+    partial = ["https://www.googleapis.com/auth/userinfo.email",
+               "https://www.googleapis.com/auth/userinfo.profile", "openid"]
+    _write_token(paths_mod, "partial@gmail.com", partial)
+
+    blob_scopes = [s for s in partial
+                   if "/auth/" in s
+                   and not s.endswith(("userinfo.email", "userinfo.profile"))]
+    assert blob_scopes == [], "openid has no /auth/ prefix; the filter must catch this"

@@ -25,6 +25,7 @@ import asyncio
 import logging
 import os
 import socket
+import time
 
 from . import installer, mcp_config, paths, routes as routes_mod, server_config
 
@@ -100,18 +101,47 @@ class GoogleWorkspaceMcpAppPlugin:
         return result
 
     def restart_service(self, ctx) -> dict:
+        """Stop, wait for the port to actually come free, then start.
+
+        The wait is the whole point. ``ctx.services.stop`` signals the process
+        group and returns; the listener can outlive that by a second or two.
+        ``workspace-mcp`` pre-flights its bind and calls ``sys.exit(1)`` when the
+        port is taken, so a stop-then-immediately-start restart produces a
+        service that reports ``running: true`` for one poll and is gone by the
+        next — with the reason only in a log this app cannot capture. Hit live
+        on 2026-08-18 doing two restarts in a row.
+        """
         if not self._registered:
             return {"restarted": False, "reason": "service not registered yet"}
         try:
             ctx.services.stop(SERVICE_ID)
         except Exception as exc:
             log.warning("google-workspace-mcp: stop before restart failed: %s", exc)
+
+        port = server_config.port_of(ctx.config)
+        if not self._wait_for_port_free(port):
+            log.warning("google-workspace-mcp: port %s still bound after %ss; "
+                        "starting anyway", port, self.PORT_FREE_TIMEOUT_S)
+
         try:
             state = ctx.services.start(SERVICE_ID)
         except Exception as exc:
             log.error("google-workspace-mcp: service failed to start: %s", exc)
             return {"restarted": False, "error": str(exc)}
         return {"restarted": True, **(state if isinstance(state, dict) else {})}
+
+    PORT_FREE_TIMEOUT_S = 15.0
+
+    def _wait_for_port_free(self, port: int) -> bool:
+        """True once nothing accepts a connection on ``port``."""
+        deadline = time.monotonic() + self.PORT_FREE_TIMEOUT_S
+        while time.monotonic() < deadline:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                probe.settimeout(0.5)
+                if probe.connect_ex(("127.0.0.1", port)) != 0:
+                    return True
+            time.sleep(0.5)
+        return False
 
     async def save_core_config(self, ctx, updates: dict) -> dict:
         """Persist non-secret settings through core's own config route.

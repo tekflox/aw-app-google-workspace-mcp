@@ -48,13 +48,56 @@ def build_routes(ctx, plugin) -> FastAPI:
         return server_config.is_configured(ctx.config, _secret())
 
     def _authorized_accounts() -> list[str]:
-        """Which Google accounts already have a token on disk. This is the only
-        honest answer to "am I logged in?" — an OAuth client being configured
-        says nothing about consent having been given."""
+        """Google accounts with a token file on disk.
+
+        ``oauth_states.json`` lives in the same directory and is the server's
+        in-flight CSRF-state store, not an account — globbing ``*.json`` blindly
+        reported it as one, so a workspace that had merely *started* a consent
+        flow looked authorized. Filtering on "@" is enough: token files are
+        named after the email address.
+        """
         try:
-            return sorted(p.stem for p in paths.credentials_dir().glob("*.json"))
+            return sorted(p.stem for p in paths.credentials_dir().glob("*.json")
+                          if "@" in p.stem)
         except OSError:
             return []
+
+    def _token_health(email: str) -> dict:
+        """Whether a token file is actually *usable*, which is not the same as
+        present — and the difference cost a whole debugging session.
+
+        Two ways a token on disk is dead weight, both of which look identical to
+        a good one until a tool call fails:
+
+        * Google no longer honours the refresh token (``invalid_grant``). An
+          OAuth app in `Testing` publishing status expires refresh tokens after
+          7 days, so this is the *normal* end state, not an edge case.
+        * The grant is **partial**. Google's consent screen lists sensitive
+          scopes as opt-in checkboxes; clicking through without ticking them
+          yields a token carrying only ``openid``/``userinfo``. The exchange
+          succeeds, the file is written, and every real API call still demands
+          re-authorization.
+
+        Reported per account rather than folded into one boolean, because the
+        two need different fixes: re-consent vs re-consent *and tick the boxes*.
+        """
+        path = paths.credentials_dir() / f"{email}.json"
+        try:
+            blob = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return {"usable": False, "reason": f"unreadable: {exc}"}
+
+        scopes = [s for s in (blob.get("scopes") or [])
+                  if "/auth/" in s and not s.endswith(("userinfo.email", "userinfo.profile"))]
+        if not scopes:
+            return {"usable": False, "reason": "partial grant — only openid/userinfo "
+                                               "were approved; re-consent and tick every "
+                                               "permission checkbox",
+                    "scope_count": 0}
+        if not blob.get("refresh_token"):
+            return {"usable": False, "reason": "no refresh_token — the grant was not offline",
+                    "scope_count": len(scopes)}
+        return {"usable": True, "scope_count": len(scopes)}
 
     def _service_state() -> dict:
         try:
@@ -66,12 +109,17 @@ def build_routes(ctx, plugin) -> FastAPI:
     async def status() -> dict:
         accounts = _authorized_accounts()
         configured = _configured()
+        health = {e: _token_health(e) for e in accounts}
+        usable = [e for e, h in health.items() if h.get("usable")]
         return {
             # "logged_in" is what windows/main.json's auth_status widget binds
-            # to. It means *authorized*, not merely configured — a saved client
-            # with no consent yet is the state that most needs to be visible.
-            "logged_in": bool(accounts),
+            # to. It tracks a *usable* token, not merely a file on disk: a dead
+            # or partially-granted token reported as logged-in is precisely how
+            # this app looked healthy for a day while every call failed.
+            "logged_in": bool(usable),
             "configured": configured,
+            "usable_accounts": usable,
+            "token_health": health,
             "client_id": str(ctx.config.get("google_oauth_client_id") or ""),
             "client_secret_saved": bool(_secret()),
             "authorized_accounts": accounts,
