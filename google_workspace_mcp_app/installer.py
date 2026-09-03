@@ -24,8 +24,26 @@ searched *first*. Two consequences, both silent:
 
 Both were hit while porting this app (2026-08-17). Every subprocess here — and
 the managed service itself, see ``scripts/run_server.sh`` — therefore runs with
-``PYTHONPATH`` removed from the environment, and the venv is built by the
-system interpreter rather than by whatever ``sys.executable`` happens to be.
+``PYTHONPATH`` removed from the environment.
+
+Which interpreter builds the venv
+----------------------------------
+This used to hardcode ``/usr/bin/python3`` on the theory that the venv should
+be built by "the system interpreter" rather than by whatever ``sys.executable``
+happens to be. That path does not exist on this app's actual base image (the
+real interpreter lives at ``/usr/local/bin/python3.12``), so the hardcoded
+check silently fell through to ``shutil.which("python3")`` — a PATH lookup
+that depends on whatever happens to be first on ``PATH`` in the calling
+process's environment. Confirmed live 2026-09-03: it resolved to the shared
+workspace venv's own ``python3``, and a base-image change (or a PATH that
+doesn't carry that venv's bin dir) breaks it again the same way.
+
+``sys.executable`` — the interpreter actually running this code — is always a
+real path that exists, so it needs no guessing. It is safe even when it is
+itself the shared venv's python: CPython's ``venv`` module always records the
+TRUE base interpreter in the new venv's ``pyvenv.cfg`` (walking past the
+enclosing venv), never the enclosing venv's own path, so this can't produce a
+venv nested inside another venv.
 """
 from __future__ import annotations
 
@@ -33,12 +51,12 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 
 from . import paths
 
 log = logging.getLogger("aw_apps.google-workspace-mcp")
 
-SYSTEM_PYTHON = "/usr/bin/python3"
 PIP_TIMEOUT_S = 900
 
 
@@ -52,12 +70,17 @@ def clean_env(extra: dict[str, str] | None = None) -> dict[str, str]:
 
 
 def _python() -> str:
-    return SYSTEM_PYTHON if os.path.exists(SYSTEM_PYTHON) else (
-        shutil.which("python3") or "python3")
+    return sys.executable
 
 
 def is_installed(package_dir: str) -> bool:
-    return paths.venv_bin(package_dir).exists()
+    """``venv_bin`` is a script whose shebang names the venv's own
+    ``bin/python3.12`` — a regular file whose ``.exists()`` says nothing about
+    whether the interpreter it points at is reachable. Checking ``venv_python``
+    too (a symlink chain ending at the real interpreter) is what makes
+    ``ensure_installed`` actually self-heal a venv left with a dead shebang
+    target, instead of reporting installed forever."""
+    return paths.venv_bin(package_dir).exists() and paths.venv_python(package_dir).exists()
 
 
 def ensure_installed(package_dir: str, version: str) -> dict:
