@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "google-workspace-mcp",
   "name": "Google Workspace MCP",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Ports agentic-workspace's aw-google-workspace integration into aw-workspace: runs the community workspace-mcp server (taylorwilsdon/google_workspace_mcp) as a managed background service and registers it with MCP Gateway, giving every agent Gmail, Drive, Calendar, Docs, Sheets, Tasks and Contacts tools behind one Google OAuth token.",
   "icon": "mail",
   "tier": "inprocess",
