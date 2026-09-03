@@ -57,5 +57,12 @@ def venv_bin(package_dir: str) -> Path:
     return venv_dir(package_dir) / "bin" / "workspace-mcp"
 
 
+def venv_python(package_dir: str) -> Path:
+    """The venv's own interpreter — used to run one-off helper scripts (e.g.
+    building an OAuth authorization URL) that need the upstream package's
+    modules but aren't the long-running server itself."""
+    return venv_dir(package_dir) / "bin" / "python"
+
+
 def env_file(package_dir: str) -> Path:
     return data_dir(package_dir) / "server.env"

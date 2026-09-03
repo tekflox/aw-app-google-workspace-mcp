@@ -24,11 +24,12 @@ its Kanban database id through the generic path.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 
 from fastapi import Body, FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from . import installer, mcp_config, paths, server_config
 
@@ -36,6 +37,38 @@ log = logging.getLogger("aw_apps.google-workspace-mcp")
 
 SECRET_KEY = "google_oauth_client_secret"
 SERVICE_ID = "workspace-mcp"
+
+# Run in the app's private venv (see installer.py) via subprocess, not
+# imported here — this process is the workspace's shared interpreter, which
+# never has the upstream `workspace-mcp` package on its path. Calls the exact
+# function the `start_google_auth` MCP tool calls, so the OAuth state it
+# writes to the on-disk shared store (WORKSPACE_MCP_CREDENTIALS_DIR) is the
+# same one the running server reads back at /oauth2callback — no separate
+# state-sharing code needed here, only the URL extraction.
+_OAUTH_START_SCRIPT = r"""
+import asyncio, os, re, sys
+
+from auth.google_auth import start_auth_flow
+
+async def main():
+    msg = await start_auth_flow(
+        user_google_email=os.environ.get("USER_GOOGLE_EMAIL") or None,
+        service_name="Google Workspace",
+        redirect_uri=os.environ["GOOGLE_OAUTH_REDIRECT_URI"],
+    )
+    match = re.search(r"Authorization URL:\s*(\S+)", msg)
+    if not match:
+        sys.stderr.write(msg)
+        sys.exit(1)
+    sys.stdout.write(match.group(1))
+
+try:
+    asyncio.run(main())
+except Exception as exc:
+    sys.stderr.write(str(exc))
+    sys.exit(1)
+"""
+_OAUTH_START_TIMEOUT_S = 30
 
 
 def build_routes(ctx, plugin) -> FastAPI:
@@ -205,6 +238,50 @@ def build_routes(ctx, plugin) -> FastAPI:
     async def list_credentials() -> dict:
         return {"dir": str(paths.credentials_dir()),
                 "accounts": _authorized_accounts()}
+
+    @app.get("/oauth/start")
+    async def oauth_start():
+        """A real browser navigation target (windows/main.json's "Connect
+        Google Account" markdown link points straight here), not a fetch():
+        on success this redirects the browser to Google's consent screen, on
+        failure it renders the reason in the same tab as plain text.
+
+        Lets a human self-serve a fresh consent flow by clicking, instead of
+        needing an agent to call the start_google_auth MCP tool and relay the
+        URL. See _OAUTH_START_SCRIPT's docstring for why this runs as a
+        subprocess in the private venv rather than importing the upstream
+        package directly.
+        """
+        if not _configured():
+            return Response("Save an OAuth client id and secret below first.",
+                            status_code=400, media_type="text/plain")
+        if not installer.is_installed(ctx.package_dir):
+            return Response(
+                "workspace-mcp is not installed yet — use Reinstall server below.",
+                status_code=409, media_type="text/plain")
+
+        env = installer.clean_env(server_config.build_env(ctx.config, _secret()))
+        python = str(paths.venv_python(ctx.package_dir))
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                python, "-c", _OAUTH_START_SCRIPT,
+                cwd=ctx.package_dir, env=env,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=_OAUTH_START_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            return Response("Timed out building the Google consent URL.",
+                            status_code=504, media_type="text/plain")
+
+        auth_url = stdout.decode("utf-8").strip()
+        if proc.returncode != 0 or not auth_url:
+            detail = stderr.decode("utf-8", "replace").strip()[-800:] or "unknown error"
+            log.error("google-workspace-mcp: oauth/start failed: %s", detail)
+            return Response(f"Could not start Google authorization: {detail}",
+                            status_code=502, media_type="text/plain")
+
+        log.info("google-workspace-mcp: oauth/start issued a fresh consent URL")
+        return RedirectResponse(auth_url, status_code=302)
 
     @app.post("/oauth-callback")
     async def relay_oauth_callback(data: dict = Body(...)) -> dict:
