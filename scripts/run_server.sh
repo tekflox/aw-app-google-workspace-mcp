@@ -42,4 +42,24 @@ fi
 # and nothing publishes this port to the host.
 export WORKSPACE_MCP_HOST="${WORKSPACE_MCP_HOST:-0.0.0.0}"
 
+# workspace-mcp's own main.py renders every startup diagnostic — every
+# validation-failure exit, and the final HTTP-bind error — through a
+# safe_print() that checks sys.stderr.isatty(). Under ServiceSupervisor's
+# piped, non-TTY subprocess that check is always false, so safe_print()
+# downgrades the message to logger.debug() instead of printing it — and
+# logging.basicConfig(level=INFO) (also upstream) drops a .debug() call
+# before it reaches any handler. Net effect: any startup failure produces
+# zero diagnostics anywhere, ever. We can't patch the installed package, so
+# allocate a real pty for it instead — `script` makes isatty() true and the
+# real error text gets printed and captured by ServiceSupervisor like any
+# other log line. Scoped to this app's own launcher, not the shared
+# ServiceSupervisor every other managed service goes through.
+if command -v script >/dev/null 2>&1; then
+  quoted="$bin"
+  for arg in "$@"; do
+    quoted+=" $(printf '%q' "$arg")"
+  done
+  exec script -qec "$quoted" /dev/null
+fi
+
 exec "$bin" "$@"

@@ -101,15 +101,23 @@ class GoogleWorkspaceMcpAppPlugin:
         return result
 
     def restart_service(self, ctx) -> dict:
-        """Stop, wait for the port to actually come free, then start.
+        """Stop, wait for the port to actually come free, then start —
+        retrying the start itself if it loses the race anyway.
 
-        The wait is the whole point. ``ctx.services.stop`` signals the process
-        group and returns; the listener can outlive that by a second or two.
-        ``workspace-mcp`` pre-flights its bind and calls ``sys.exit(1)`` when the
-        port is taken, so a stop-then-immediately-start restart produces a
-        service that reports ``running: true`` for one poll and is gone by the
-        next — with the reason only in a log this app cannot capture. Hit live
-        on 2026-08-18 doing two restarts in a row.
+        The port-free wait is not a reliable proxy for "a fresh bind() will
+        succeed": it probes with ``connect()``, which only detects an
+        actively LISTENING socket, not a port that's unbindable because of
+        lingering TIME_WAIT/CLOSE_WAIT state left by the just-killed
+        process's still-open HTTP/SSE connections. ``workspace-mcp``
+        pre-flights its bind and calls ``sys.exit(1)`` when the port is
+        taken, so a stop-then-immediately-start restart can produce a
+        service that reports ``running: true`` for one poll and is gone by
+        the next. Hit live on 2026-08-18 doing two restarts in a row.
+
+        So a start that dies almost immediately gets retried a few times
+        with backoff — a transient port-still-settling condition self-heals
+        within a few seconds instead of leaving the service down until a
+        human notices.
         """
         if not self._registered:
             return {"restarted": False, "reason": "service not registered yet"}
@@ -123,14 +131,30 @@ class GoogleWorkspaceMcpAppPlugin:
             log.warning("google-workspace-mcp: port %s still bound after %ss; "
                         "starting anyway", port, self.PORT_FREE_TIMEOUT_S)
 
-        try:
-            state = ctx.services.start(SERVICE_ID)
-        except Exception as exc:
-            log.error("google-workspace-mcp: service failed to start: %s", exc)
-            return {"restarted": False, "error": str(exc)}
-        return {"restarted": True, **(state if isinstance(state, dict) else {})}
+        state: dict = {}
+        for attempt in range(1, self.START_RETRY_ATTEMPTS + 1):
+            try:
+                state = ctx.services.start(SERVICE_ID)
+            except Exception as exc:
+                log.error("google-workspace-mcp: service failed to start: %s", exc)
+                return {"restarted": False, "error": str(exc)}
+            state = self._wait_for_settled(ctx, state)
+            if state.get("running"):
+                return {"restarted": True, **state}
+            log.warning(
+                "google-workspace-mcp: start attempt %s/%s died immediately (%s)%s",
+                attempt, self.START_RETRY_ATTEMPTS,
+                state.get("last_error") or "no diagnostic captured",
+                "; retrying" if attempt < self.START_RETRY_ATTEMPTS else "",
+            )
+            if attempt < self.START_RETRY_ATTEMPTS:
+                time.sleep(self.START_RETRY_BACKOFF_S)
+        return {"restarted": False, **state}
 
     PORT_FREE_TIMEOUT_S = 15.0
+    START_RETRY_ATTEMPTS = 4
+    START_RETRY_BACKOFF_S = 2.0
+    STARTUP_SETTLE_S = 3.0
 
     def _wait_for_port_free(self, port: int) -> bool:
         """True once nothing accepts a connection on ``port``."""
@@ -142,6 +166,16 @@ class GoogleWorkspaceMcpAppPlugin:
                     return True
             time.sleep(0.5)
         return False
+
+    def _wait_for_settled(self, ctx, state: dict) -> dict:
+        """``workspace-mcp`` either binds within a couple of seconds or exits
+        ``1`` — poll status across that window so a lost bind race is caught
+        here instead of being reported as a healthy restart."""
+        deadline = time.monotonic() + self.STARTUP_SETTLE_S
+        while state.get("running") and time.monotonic() < deadline:
+            time.sleep(0.5)
+            state = ctx.services.status(SERVICE_ID)
+        return state
 
     async def save_core_config(self, ctx, updates: dict) -> dict:
         """Persist non-secret settings through core's own config route.
