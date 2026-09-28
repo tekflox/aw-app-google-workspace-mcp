@@ -51,7 +51,33 @@
       "widgets": [
         {
           "type": "markdown",
-          "value": "### Authorizing a Google account\nA saved OAuth client is not consent. Two ways to get a token:\n\n1. **[Connect Google Account](/api/apps/google-workspace-mcp/oauth/start)** — opens in a new tab and starts a fresh Google consent flow for the configured account. The callback lands on this server's own `/oauth2callback`, so the browser completing it must be able to reach that port. Use this to (re)authorize, or to recover from an expired/revoked token — no agent needed.\n2. **Import an existing one** — if this account was already authorized in agentic-workspace, copy its `<email>.json` from that host's `.tmp/google_workspace_mcp_credentials/` and POST it to `/api/apps/google-workspace-mcp/credentials` with `{\"email\": \"…\", \"credentials\": {…}}`. No consent screen, no browser.\n\nTokens live in `$AW_WORKSPACE_HOME/data/google-workspace-mcp/credentials/` and survive an app reinstall."
+          "value": "### Authorizing a Google account\nA saved OAuth client is not consent — grant it below.\n\n<a href=\"/api/apps/google-workspace-mcp/oauth/start\" style=\"display:inline-block;padding:10px 20px;border-radius:8px;font-size:13px;font-weight:700;text-decoration:none;background:var(--color-accent);color:#1a1205;border:1px solid var(--color-accent);\">Connect Google Account →</a>\n\nOpens in a new tab and starts a fresh Google consent flow for the configured account. The callback lands on this server's own `/oauth2callback`, so the browser completing it must be able to reach that port. Use this to (re)authorize, or to recover from an expired/revoked token — no agent needed. If that tab lands on a connection error instead, see **Consent redirect landed on a dead tab?** below.\n\n**Or import an existing token** — if this account was already authorized in agentic-workspace, copy its `<email>.json` from that host's `.tmp/google_workspace_mcp_credentials/` and POST it to `/api/apps/google-workspace-mcp/credentials` with `{\"email\": \"…\", \"credentials\": {…}}`. No consent screen, no browser.\n\nTokens live in `$AW_WORKSPACE_HOME/data/google-workspace-mcp/credentials/` and survive an app reinstall."
+        },
+        {
+          "type": "collapsible",
+          "title": "Consent redirect landed on a dead tab?",
+          "collapsed": true,
+          "widgets": [
+            {
+              "type": "markdown",
+              "value": "The OAuth client is a Google **Desktop app** client, so Google only allows redirecting to `localhost` — from your browser that means *your own machine*, not this container. If clicking Connect above ends on a tab that fails to load, the authorization code is still sitting in that tab's address bar. Copy the whole URL and paste it here to finish signing in."
+            },
+            {
+              "type": "form",
+              "id": "google_workspace_oauth_relay",
+              "submit": { "call": "POST /api/apps/google-workspace-mcp/oauth-callback" },
+              "submit_label": "Complete sign-in",
+              "fields": [
+                {
+                  "key": "url",
+                  "label": "Redirect URL from the dead tab",
+                  "input": "text",
+                  "placeholder": "http://localhost:8010/oauth2callback?code=...&state=...",
+                  "description": "Host and port are ignored — only the code/state query string matters."
+                }
+              ]
+            }
+          ]
         }
       ]
     },
