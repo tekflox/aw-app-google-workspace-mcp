@@ -27,11 +27,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+from datetime import datetime, timedelta
 
 from fastapi import Body, FastAPI
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from . import installer, mcp_config, paths, server_config
+from .broker_client import BrokerRequestFailed, BrokerUnavailable, GoogleOAuthBroker
 
 log = logging.getLogger("aw_apps.google-workspace-mcp")
 
@@ -69,6 +72,23 @@ except Exception as exc:
     sys.exit(1)
 """
 _OAUTH_START_TIMEOUT_S = 30
+
+# Same "run in the private venv" reasoning as _OAUTH_START_SCRIPT, for a
+# different reason: this process never has the upstream `auth.scopes`
+# module on its path. Reading TOOL_SCOPES_MAP from the installed venv (not a
+# hand-copied map here) means the cloud-broker scope request can never drift
+# from what `pin_version` actually ships.
+_SCOPES_SCRIPT = r"""
+import json, os, sys
+
+from auth.scopes import BASE_SCOPES, TOOL_SCOPES_MAP
+
+tools = os.environ.get("TOOL_GROUPS", "").split()
+scopes = set(BASE_SCOPES)
+for t in tools:
+    scopes.update(TOOL_SCOPES_MAP.get(t, []))
+sys.stdout.write(json.dumps(sorted(scopes)))
+"""
 
 
 def build_routes(ctx, plugin) -> FastAPI:
@@ -131,6 +151,40 @@ def build_routes(ctx, plugin) -> FastAPI:
             return {"usable": False, "reason": "no refresh_token — the grant was not offline",
                     "scope_count": len(scopes)}
         return {"usable": True, "scope_count": len(scopes)}
+
+    async def _derive_scopes() -> list[str] | None:
+        """The full Google scope list for this workspace's configured tool
+        groups — see ``_SCOPES_SCRIPT``'s docstring for why it runs as a
+        subprocess in the private venv rather than a hand-copied map here."""
+        env = installer.clean_env({"TOOL_GROUPS": " ".join(server_config.tool_groups(ctx.config))})
+        python = str(paths.venv_python(ctx.package_dir))
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                python, "-c", _SCOPES_SCRIPT,
+                cwd=ctx.package_dir, env=env,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=_OAUTH_START_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            log.error("google-workspace-mcp: scope derivation timed out")
+            return None
+        if proc.returncode != 0:
+            log.error("google-workspace-mcp: scope derivation failed: %s",
+                      stderr.decode("utf-8", "replace").strip()[-800:])
+            return None
+        try:
+            return json.loads(stdout.decode("utf-8"))
+        except json.JSONDecodeError:
+            return None
+
+    def _own_oauth_finish_url() -> str | None:
+        """This workspace's own public callback for the cloud broker to send
+        the browser back to — ``AW_WORKSPACE_API_URL`` is published at boot
+        by ``src.api.workspace_url.publish_workspace_api_url()`` (unset in a
+        dev/test process with no public tunnel). Same source aw-app-plaud's
+        ``oauth.redirect_uri`` already relies on for the same purpose."""
+        base = (os.environ.get("AW_WORKSPACE_API_URL") or "").strip().rstrip("/")
+        return f"{base}/api/apps/google-workspace-mcp/oauth/finish" if base else None
 
     def _service_state() -> dict:
         try:
@@ -251,37 +305,140 @@ def build_routes(ctx, plugin) -> FastAPI:
         URL. See _OAUTH_START_SCRIPT's docstring for why this runs as a
         subprocess in the private venv rather than importing the upstream
         package directly.
+
+        Branches on whether a BYO OAuth client is already saved: if so,
+        nothing below changes — same subprocess flow as always, hitting this
+        server's own ``/oauth2callback``. If not, and this workspace is
+        cloud-linked (``AW_WORKSPACE_HOST_TOKEN`` present), it asks
+        aw-backend's shared workspace-mcp broker for a consent URL instead —
+        zero-config "Connect Google Account", no console.cloud.google.com
+        step. See ``GET /oauth/finish`` for the other half of that flow.
         """
-        if not _configured():
-            return Response("Save an OAuth client id and secret below first.",
-                            status_code=400, media_type="text/plain")
+        if _configured():
+            if not installer.is_installed(ctx.package_dir):
+                return Response(
+                    "workspace-mcp is not installed yet — use Reinstall server below.",
+                    status_code=409, media_type="text/plain")
+
+            env = installer.clean_env(server_config.build_env(ctx.config, _secret()))
+            python = str(paths.venv_python(ctx.package_dir))
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    python, "-c", _OAUTH_START_SCRIPT,
+                    cwd=ctx.package_dir, env=env,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=_OAUTH_START_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                return Response("Timed out building the Google consent URL.",
+                                status_code=504, media_type="text/plain")
+
+            auth_url = stdout.decode("utf-8").strip()
+            if proc.returncode != 0 or not auth_url:
+                detail = stderr.decode("utf-8", "replace").strip()[-800:] or "unknown error"
+                log.error("google-workspace-mcp: oauth/start failed: %s", detail)
+                return Response(f"Could not start Google authorization: {detail}",
+                                status_code=502, media_type="text/plain")
+
+            log.info("google-workspace-mcp: oauth/start issued a fresh consent URL")
+            return RedirectResponse(auth_url, status_code=302)
+
+        broker = GoogleOAuthBroker()
+        if not broker.configured:
+            return Response(
+                "Save an OAuth client id and secret below first — or link this "
+                "workspace to the cloud (Settings › Networking) to connect "
+                "without one.",
+                status_code=400, media_type="text/plain")
         if not installer.is_installed(ctx.package_dir):
             return Response(
                 "workspace-mcp is not installed yet — use Reinstall server below.",
                 status_code=409, media_type="text/plain")
 
-        env = installer.clean_env(server_config.build_env(ctx.config, _secret()))
-        python = str(paths.venv_python(ctx.package_dir))
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                python, "-c", _OAUTH_START_SCRIPT,
-                cwd=ctx.package_dir, env=env,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=_OAUTH_START_TIMEOUT_S)
-        except asyncio.TimeoutError:
-            return Response("Timed out building the Google consent URL.",
-                            status_code=504, media_type="text/plain")
+        return_url = _own_oauth_finish_url()
+        if not return_url:
+            return Response(
+                "This workspace has no published public URL yet (AW_WORKSPACE_API_URL) "
+                "— the cloud-linked Connect Google Account path needs it.",
+                status_code=503, media_type="text/plain")
 
-        auth_url = stdout.decode("utf-8").strip()
-        if proc.returncode != 0 or not auth_url:
-            detail = stderr.decode("utf-8", "replace").strip()[-800:] or "unknown error"
-            log.error("google-workspace-mcp: oauth/start failed: %s", detail)
-            return Response(f"Could not start Google authorization: {detail}",
+        scopes = await _derive_scopes()
+        if not scopes:
+            return Response("Could not determine which Google scopes to request.",
+                            status_code=500, media_type="text/plain")
+
+        try:
+            authorize_url = broker.start(scopes, return_url)
+        except (BrokerUnavailable, BrokerRequestFailed) as exc:
+            return Response(f"Could not start Google authorization: {exc}",
                             status_code=502, media_type="text/plain")
 
-        log.info("google-workspace-mcp: oauth/start issued a fresh consent URL")
-        return RedirectResponse(auth_url, status_code=302)
+        log.info("google-workspace-mcp: oauth/start issued a cloud-broker consent URL")
+        return RedirectResponse(authorize_url, status_code=302)
+
+    @app.get("/oauth/finish")
+    async def oauth_finish(ticket: str | None = None, error: str | None = None):
+        """The other half of the cloud-linked ``GET /oauth/start`` branch
+        above: the browser lands here once aw-backend's shared broker has
+        completed Google consent on this workspace's behalf. Redeems the
+        one-time ``ticket`` server-to-server, saves the shared client
+        through the SAME settings machinery ``POST /settings`` already uses
+        (``is_configured()``/``build_env()`` need no changes for this path),
+        writes the token file in the exact shape the upstream
+        ``LocalDirectoryCredentialStore`` reads back, and restarts.
+        """
+        if error:
+            return Response(f"Google sign-in failed: {error}",
+                            status_code=400, media_type="text/plain")
+        if not ticket:
+            return Response("Missing ticket.", status_code=400, media_type="text/plain")
+
+        broker = GoogleOAuthBroker()
+        try:
+            result = broker.redeem(ticket)
+        except (BrokerUnavailable, BrokerRequestFailed) as exc:
+            return Response(f"Could not complete Google sign-in: {exc}",
+                            status_code=502, media_type="text/plain")
+
+        client_id = (result.get("client_id") or "").strip()
+        client_secret = (result.get("client_secret") or "").strip()
+        tokens = result.get("tokens") or {}
+        email = (result.get("email") or "").strip()
+        if not client_id or not client_secret or not email or not tokens.get("refresh_token"):
+            return Response("The broker returned an incomplete grant — try connecting again.",
+                            status_code=502, media_type="text/plain")
+
+        ctx.secrets.write(SECRET_KEY, client_secret)
+        if client_id != str(ctx.config.get("google_oauth_client_id") or ""):
+            await plugin.save_core_config(ctx, {"google_oauth_client_id": client_id})
+
+        expires_in = tokens.get("expires_in")
+        expiry = (datetime.utcnow() + timedelta(seconds=expires_in)).isoformat() if expires_in else None
+        credentials_blob = {
+            "token": tokens.get("access_token"),
+            "refresh_token": tokens.get("refresh_token"),
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "scopes": str(tokens.get("scope") or "").split(),
+            "expiry": expiry,
+        }
+        path = paths.credentials_dir() / f"{email}.json"
+        path.write_text(json.dumps(credentials_blob, indent=2), encoding="utf-8")
+        path.chmod(0o600)
+
+        plugin.apply_config(ctx, restart=True)
+
+        health = _token_health(email)
+        log.info("google-workspace-mcp: cloud-broker consent completed email=%s usable=%s",
+                 email, health.get("usable"))
+        if not health.get("usable"):
+            return Response(
+                f"Connected as {email}, but {health.get('reason')} — go back and "
+                "tick every permission checkbox, then try again.",
+                status_code=200, media_type="text/plain")
+        return Response(f"Google account {email} connected. You can close this tab.",
+                        status_code=200, media_type="text/plain")
 
     @app.post("/oauth-callback")
     async def relay_oauth_callback(data: dict = Body(...)) -> dict:
