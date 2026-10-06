@@ -24,7 +24,8 @@
     "secrets:own",
     "service:manage",
     "fs:workspace-data",
-    "net:outbound"
+    "net:outbound",
+    "notifications:send"
   ],
   "contributes": {
     "routes": [
@@ -52,7 +53,8 @@
     "settings_panels": [
       {
         "id": "google-workspace-mcp.settings",
-        "window": "google-workspace-mcp.main"
+        "window": "google-workspace-mcp.main",
+        "schema_form": "advanced"
       }
     ],
     "mcp": {

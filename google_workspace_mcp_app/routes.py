@@ -152,6 +152,14 @@ def build_routes(ctx, plugin) -> FastAPI:
                     "scope_count": len(scopes)}
         return {"usable": True, "scope_count": len(scopes)}
 
+    def _emit_oauth_event(email: str, usable: bool) -> None:
+        """Nudge any open Settings window via the generic ``app_event`` WS
+        frame (``ctx.notify.event()``, ``src/apps/base.py``) so it refreshes
+        its Google account status without the user closing and reopening the
+        panel. Ephemeral — a closed window just misses the nudge, same as
+        the ninja toast below."""
+        ctx.notify.event("oauth_completed", {"email": email, "usable": usable})
+
     async def _derive_scopes() -> list[str] | None:
         """The full Google scope list for this workspace's configured tool
         groups — see ``_SCOPES_SCRIPT``'s docstring for why it runs as a
@@ -432,7 +440,15 @@ def build_routes(ctx, plugin) -> FastAPI:
         health = _token_health(email)
         log.info("google-workspace-mcp: cloud-broker consent completed email=%s usable=%s",
                  email, health.get("usable"))
-        if not health.get("usable"):
+        usable = bool(health.get("usable"))
+        _emit_oauth_event(email, usable)
+        ctx.notify(
+            f"Google account {email} connected." if usable
+            else f"Google account {email} connected, but {health.get('reason')}.",
+            level="success" if usable else "warning",
+            title="Google Workspace MCP",
+        )
+        if not usable:
             return Response(
                 f"Connected as {email}, but {health.get('reason')} — go back and "
                 "tick every permission checkbox, then try again.",
@@ -487,6 +503,7 @@ def build_routes(ctx, plugin) -> FastAPI:
                           "redirect URL, including its ?code=… query string"},
                 status_code=400)
 
+        accounts_before = set(_authorized_accounts())
         port = server_config.port_of(ctx.config)
         target = f"http://127.0.0.1:{port}/oauth2callback"
         try:
@@ -501,6 +518,14 @@ def build_routes(ctx, plugin) -> FastAPI:
         ok = resp.status_code < 400 and bool(accounts)
         log.info("google-workspace-mcp: oauth callback relayed, status=%s accounts=%s",
                  resp.status_code, accounts)
+        if ok:
+            # This is the NORMAL completion path for the BYO desktop-client
+            # flow (its redirect always lands on a dead tab) — the account
+            # that just changed, or every current one if none diffed (a
+            # re-consent of the same email leaves the account set unchanged).
+            changed = set(accounts) - accounts_before or set(accounts)
+            for changed_email in changed:
+                _emit_oauth_event(changed_email, bool(_token_health(changed_email).get("usable")))
         return {
             "ok": ok,
             "callback_status": resp.status_code,
@@ -547,6 +572,7 @@ def build_routes(ctx, plugin) -> FastAPI:
         # The server reads the credentials dir at call time, but a restart also
         # clears any cached "this account is unauthenticated" state.
         plugin.restart_service(ctx)
+        _emit_oauth_event(email, bool(_token_health(email).get("usable")))
         return {"ok": True, "email": email, "accounts": _authorized_accounts()}
 
     @app.delete("/credentials/{email}")
@@ -556,6 +582,8 @@ def build_routes(ctx, plugin) -> FastAPI:
         if existed:
             path.unlink()
         plugin.restart_service(ctx)
+        if existed:
+            _emit_oauth_event(email, False)
         return {"ok": True, "deleted": existed, "accounts": _authorized_accounts()}
 
     @app.get("/mcp.json")

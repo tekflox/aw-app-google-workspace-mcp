@@ -92,18 +92,25 @@
       "id": "server",
       "widgets": [
         {
-          "type": "markdown",
-          "value": "### Server\n`workspace-mcp` runs in its own private venv — never the workspace's shared one, whose `starlette`/`cryptography`/`mcp` versions it would otherwise upgrade under every other Python MCP server. Reinstall it after changing `pin_version` in Settings."
-        },
-        {
-          "type": "button",
-          "label": "Restart server",
-          "action": { "call": "POST /api/apps/google-workspace-mcp/restart" }
-        },
-        {
-          "type": "button",
-          "label": "Reinstall server",
-          "action": { "call": "POST /api/apps/google-workspace-mcp/install" }
+          "type": "collapsible",
+          "title": "Advanced: server management",
+          "collapsed": true,
+          "widgets": [
+            {
+              "type": "markdown",
+              "value": "### Server\n`workspace-mcp` runs in its own private venv — never the workspace's shared one, whose `starlette`/`cryptography`/`mcp` versions it would otherwise upgrade under every other Python MCP server. Reinstall it after changing `pin_version` in Settings."
+            },
+            {
+              "type": "button",
+              "label": "Restart server",
+              "action": { "call": "POST /api/apps/google-workspace-mcp/restart" }
+            },
+            {
+              "type": "button",
+              "label": "Reinstall server",
+              "action": { "call": "POST /api/apps/google-workspace-mcp/install" }
+            }
+          ]
         }
       ]
     }
