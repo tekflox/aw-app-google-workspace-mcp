@@ -291,10 +291,19 @@ def build_routes(ctx, plugin) -> FastAPI:
     @app.get("/logs")
     async def logs() -> dict:
         """The managed service's captured stdout/stderr backlog — the only log
-        source a Tier-1 managed service has (no container log driver)."""
-        state = _service_state()
-        return {"service": SERVICE_ID, "lines": state.get("log_lines") or [],
-                "running": bool(state.get("running"))}
+        source a Tier-1 managed service has (no container log driver).
+
+        ``ctx.services.status()`` never carries a ``log_lines`` key (only
+        ``ServiceSupervisor.logs()`` returns the backlog, as a loose list) —
+        reading it off ``status()`` always returned an empty list regardless
+        of what the process actually printed. ``ctx.services.logs()`` also
+        forwards to whichever worker owns the process (see
+        ``src/apps/service_relay.py``), so this is no longer at the mercy of
+        which of the ``AW_WORKSPACE_WORKERS`` workers answered the request.
+        """
+        lines = await ctx.services.logs(SERVICE_ID)
+        return {"service": SERVICE_ID, "lines": lines,
+                "running": bool(_service_state().get("running"))}
 
     @app.get("/credentials")
     async def list_credentials() -> dict:
